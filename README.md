@@ -1,37 +1,125 @@
 # Model Monitor
 
-A native macOS app for inspecting model activity captured through a local proxy.
-View daily model counts and request times, open individual request/response
-records, and retain complete captured application traffic on your Mac.
+A native macOS app for viewing model calls captured through a local proxy.
+See daily model counts and timestamps, inspect request/response packets, and
+keep the complete captured traffic on your Mac.
 
-## Features
+**Start here:** [Install](#installation) → [Set up the certificate](#2-generate-and-trust-the-proxy-certificate) → [Launch and verify](#5-start-capturing-and-check-the-result).
 
-- Start a managed local proxy and launch the selected GPT desktop app with its proxy settings.
-- Count request models and response models separately, with timestamps in Hong Kong time.
-- Open a model record to inspect its associated request, response and connection events.
-- Read indented JSON previews and reveal complete original payload files.
-- Save HTTP requests/responses, WebSocket messages and other application events exposed by mitmproxy.
-- Export model summaries as CSV or browse full saved traffic offline.
-- Choose a data folder in Settings. Closing the window keeps the proxy recording.
+This repository currently provides source code, not a downloadable installer or
+GitHub Release. The steps below build a local `Model Monitor.app`.
 
-Model counts reflect captured model fields. One chat turn can produce several
-requests; a reported model name does not verify the underlying model weights.
+## Installation
 
-## Requirements
+### 1. Install the prerequisites
 
-- Apple Silicon Mac running macOS 13 or later.
-- Apple's command-line developer tools, including `swiftc`.
-- Python 3.9 or later available at `/usr/bin/python3` for the desktop helper.
-- An installed `mitmweb` executable from mitmproxy. The capture integration has
-  been tested with mitmproxy 12.3.1.
-- A desktop application to launch and an existing mitmproxy CA trusted by the
-  application whose traffic you want to inspect.
+The app targets **Apple Silicon and macOS 13 or later**. Building requires
+Apple's command-line developer tools and Python 3.9 or later at
+`/usr/bin/python3`. The monitored desktop app must already be installed.
 
-The native UI uses SwiftUI and AppKit. The controller and unit tests use Python's
-standard library; the capture addon runs inside mitmproxy. This is an independent
-utility, not an official OpenAI application.
+Open Terminal and install Apple's tools if they are not already present:
 
-## Build and run
+```sh
+xcode-select --install
+```
+
+Wait for the installer to finish, then check:
+
+```sh
+xcrun --find swiftc
+/usr/bin/python3 --version
+```
+
+If Python is missing or older than 3.9, install or update the compatible Apple
+developer tools before continuing. This app currently uses that fixed Python
+path; installing a different interpreter elsewhere does not change it.
+
+Install [Homebrew](https://brew.sh/) if needed, following the installer’s PATH
+instructions. Current Homebrew support may require a newer macOS than the app
+itself. For older systems, consult the
+[mitmproxy installation options](https://docs.mitmproxy.org/stable/overview/installation/).
+
+Install mitmproxy, which provides `mitmweb` and `mitmdump`:
+
+```sh
+brew install --cask mitmproxy
+command -v mitmweb
+mitmweb --version
+```
+
+Keep the path printed by `command -v mitmweb`; you will select it in Settings.
+It is normally `/opt/homebrew/bin/mitmweb` on Apple Silicon. The capture
+integration has been tested with mitmproxy 12.3.1.
+See the [official macOS installation instructions](https://docs.mitmproxy.org/stable/overview/installation/).
+
+### 2. Generate and trust the proxy certificate
+
+Model Monitor needs a local mitmproxy certificate authority (CA) to decrypt
+proxied HTTPS connections. Generate the files before starting the app's proxy.
+If both files below already exist, reuse them and proceed to the trust check:
+
+```sh
+ls "$HOME/.mitmproxy/mitmproxy-ca-cert.pem" "$HOME/.mitmproxy/mitmproxy-ca.pem"
+```
+
+For a fresh setup, run:
+
+```sh
+mitmdump --listen-host 127.0.0.1 --listen-port 18749 \
+  --set confdir="$HOME/.mitmproxy"
+```
+
+Once it reports that it is listening, press **Control-C** to stop this setup
+instance. If port 18749 is occupied, use another unused high port. The managed
+proxy started later by Model Monitor uses its own ports.
+
+Mitmproxy creates a CA on first use. The two files have different purposes:
+
+| File | What to do with it |
+| --- | --- |
+| `~/.mitmproxy/mitmproxy-ca-cert.pem` | Public CA certificate: import this into Keychain Access and select it in Model Monitor. |
+| `~/.mitmproxy/mitmproxy-ca.pem` | CA plus private key: keep this private and in the same folder so the proxy can use it. |
+
+Trust only the CA created for your own proxy. Do not upload either your private
+key or captured traffic to GitHub. See [mitmproxy's certificate guide](https://docs.mitmproxy.org/stable/concepts/certificates/).
+
+#### Trust the CA using Keychain Access
+
+1. Open **Keychain Access** using Spotlight and select the **System** keychain.
+2. In Finder, use **Go → Go to Folder…** and enter `~/.mitmproxy`.
+3. Drag **mitmproxy-ca-cert.pem** into the System keychain. Authenticate if macOS asks.
+4. Find the imported **mitmproxy** certificate, double-click it, and expand **Trust**.
+5. Set **Secure Sockets Layer (SSL)** to **Always Trust**, close the certificate
+   window, and confirm the change when prompted.
+
+Apple documents [adding a certificate](https://support.apple.com/guide/keychain-access/add-certificates-to-a-keychain-kyca2431/mac)
+and [changing its trust settings](https://support.apple.com/guide/keychain-access/change-the-trust-settings-of-a-certificate-kyca11871/mac).
+
+Alternatively, this command installs the same public CA certificate into the
+System keychain with SSL trust. It requires your Mac administrator password;
+you do not need to use both methods:
+
+```sh
+sudo security add-trusted-cert -d -r trustRoot -p ssl \
+  -k /Library/Keychains/System.keychain \
+  "$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
+```
+
+Verify the selected CA with the same local trust check used by Model Monitor:
+
+```sh
+security verify-cert \
+  -c "$HOME/.mitmproxy/mitmproxy-ca-cert.pem" \
+  -p ssl -l -L -q
+```
+
+An exit status of **0** means this check passed; quiet mode may print nothing.
+A failure means the certificate or its trust settings still need attention.
+If you chose a different certificate folder, use that exact file in the command
+and in Model Monitor. The app also supplies CA environment settings when it
+launches the selected desktop app; it does not disable TLS verification.
+
+### 3. Build and install Model Monitor
 
 ```sh
 git clone https://github.com/Ooo0ption/ModelMonitor.git
@@ -40,81 +128,126 @@ cd ModelMonitor
 open "dist/Model Monitor.app"
 ```
 
-The build creates an ad-hoc-signed `dist/Model Monitor.app` and a
-`dist/Start Model Monitor.command` shortcut. You can copy the app to Applications.
-The shortcut should stay beside the app. Installers and previous release builds
-are not included in this repository.
+The build creates:
 
-1. Open **Settings** to select the desktop app, `mitmweb`, CA certificate and data folder.
-2. Click **Start Proxy & GPT**. If the selected app is already open, finish active work
-   before choosing to restart it with the proxy.
-3. Send a message, then view the daily counts or click a model record for its packets.
-4. Use **Open saved traffic** for the complete offline export, or **Export CSV** for model summaries.
+- `dist/Model Monitor.app` — the locally built, ad-hoc-signed application.
+- `dist/Start Model Monitor.command` — an optional shortcut that starts the app's
+  **Start Proxy & GPT** flow; keep it beside the app.
 
-The proxy defaults to `127.0.0.1:18741`; its viewer uses `127.0.0.1:18742`.
-An available pair is selected if those ports are occupied. The app applies proxy
-settings to the desktop app it launches; it does not change the system proxy.
-Other clients explicitly configured to use this proxy can also be captured.
-TLS verification remains enabled, and capture depends on the client trusting the CA.
+To install the application for regular use, open the output folder and drag
+**Model Monitor.app** into **Applications**:
 
-## Data storage and capture scope
+```sh
+open dist
+```
 
-New installations use `~/Library/Application Support/Model Monitor`.
-Existing profiles retain their previous data folder. Settings can move the data
-after the managed proxy has stopped, leaving the previous folder as a backup.
+Then launch **Model Monitor** from Applications. If you also want the shortcut,
+copy it beside the app. This local build is not a notarized App Store package.
 
-The proxy saves complete application-level traffic it can parse and decrypt,
-including prompts, responses, headers, cookies and credentials. Capture data
-stays outside the app bundle and is excluded from Git. Archives rotate by date
-and size; there is no automatic deletion. Recording failures stop the proxy.
+### 4. Configure the app
 
-Only traffic routed through this proxy is captured. Failed TLS handshakes have
-no decrypted body to save. The archive is not an IP/TLS packet capture, and
-WebSocket wire fragmentation and PING/PONG control frames are not exposed by
-mitmproxy's message interface. Earlier metadata-only records cannot provide
-missing historical bodies. Previews are bounded; linked payload files retain
-the complete captured bytes.
+Open **Settings** in Model Monitor. The managed proxy must be stopped before
+saving settings.
 
-See [STORAGE.txt](STORAGE.txt) for archive format, recovery and correlation
-details, and [src/README.txt](src/README.txt) for operating notes.
-
-## Source layout
-
-| Path | Purpose |
+| Setting | What to select |
 | --- | --- |
-| `src/ModelScope.swift` | Native window, model activity, packet viewer and settings |
-| `src/controller.py` | Proxy lifecycle, launch settings, data management and exports |
-| `src/capture_addon.py` | Loads full capture and lightweight model recording |
-| `src/full_capture.py` | Streaming HTTP, WebSocket and transport event recording |
-| `src/traffic_archive.py` | Durable archives, integrity checks and offline exports |
-| `src/packet_details.py` | Per-record packet correlation and formatted previews |
-| `src/capture_diagnostics.py` | TLS diagnostics and alert eligibility |
-| `src/store.py` | SQLite model summaries and deduplication |
-| `src/model_report.py` | Native mitmproxy flow parsing and model extraction |
-| `src/build.command` | Native build and local signing |
-| `tests/` | Synthetic unit tests and local proxy integration checks |
+| **GPT application** | The actual installed desktop `.app` you want to launch, such as `/Applications/ChatGPT.app` or `/Applications/Codex.app`. Use **Choose…** if its location differs. |
+| **mitmweb** | The executable path returned by `command -v mitmweb`. |
+| **Proxy certificate** | Your trusted `~/.mitmproxy/mitmproxy-ca-cert.pem` file. The matching `mitmproxy-ca.pem` must remain beside it. |
+| **Data folder** | Keep the default, `~/Library/Application Support/Model Monitor`, or select an empty folder outside the `.app`. |
+| **Proxy port** | Default: `18741`. |
+| **Capture viewer port** | Default: `18742`; it must differ from the proxy port. |
 
-Legacy internal identifiers and archive headers are retained for compatibility.
+Use **Choose…** to select files and folders, then click **Save**. When entering
+paths manually, use their full absolute paths instead of `~`.
 
-## Validation
+### 5. Start capturing and check the result
 
-Run the unit tests from the repository root:
+1. Click **Start Proxy & GPT**.
+2. If the selected desktop app is already running, finish active work and choose
+   **Restart with proxy**. **Show existing window** does not change that process's
+   existing proxy settings.
+3. Check that the sidebar says **Proxy is running** and **GPT is running**.
+4. Send a new message in the desktop app. The activity list refreshes about every
+   four seconds; check the selected date and choose **All models** if needed.
+5. Switch between **Request model** and **Response model**, then click a timestamp
+   to inspect its **Request**, **Response** and **Connection** packets.
+
+Use **Open capture viewer** for the live proxy view, **Open saved traffic** for
+full offline exports, or **Export CSV** for model counts and timestamps. Closing
+Model Monitor keeps recording; **Stop proxy** stops its managed proxy.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| `mitmweb` or `brew` is not found | Finish the Homebrew PATH setup and reopen Terminal. Use `command -v mitmweb` and select that executable in Settings. |
+| The CA file is missing | Complete the certificate-generation step before starting Model Monitor's proxy. |
+| `mitmproxy-ca.pem is missing` | The selected certificate folder must contain the matching CA/private-key file, not only the public certificate. Use the original folder. |
+| **Proxy certificate needs attention** or `tls alert certificate unknown` | Run the trust check above for the exact certificate selected in Settings. Confirm its SSL trust in Keychain Access, then completely quit and relaunch the target app through Model Monitor. Do not solve this by turning off TLS verification. |
+| Trust check succeeds but the target still rejects TLS | The client may use a separate trust store or certificate pinning. Model Monitor cannot guarantee interception of every app; macOS trust alone does not prove that every client accepts this CA. |
+| No new model records appear | Check the sidebar, date and model filter. Relaunch the target with **Restart with proxy**, then send a new message. Open the live viewer to check whether requests reach the proxy. Older requests sent directly are not captured retroactively. |
+| The sidebar shows a different port | A preferred port was occupied. Use the active port shown in the sidebar when configuring another client. |
+| **Save** in Settings is disabled | Stop the managed proxy first, then change and save the settings. |
+| A large packet says **Preview shortened** | Only the displayed preview is bounded. Use the folder button to reveal the complete saved payload. |
+
+For diagnostic logs, click **Open data folder** and inspect `proxy.log`.
+Some failures are specific to a destination or client; a TLS failure is not
+always a missing certificate. The app reports recent repeated unresolved TLS
+incidents instead of displaying stale warnings permanently.
+
+## What is captured and where it is saved
+
+Only traffic routed through this proxy is captured. Model Monitor configures
+the desktop app it launches, not the system proxy. Other clients explicitly
+configured to use its active proxy address can also be captured.
+
+HTTP requests/responses, WebSocket messages and other application events exposed
+by mitmproxy are saved locally. Payloads include prompts, responses, headers,
+cookies and credentials without redaction. Failed TLS handshakes have no
+decrypted body to save. This is an application traffic archive, not an IP/TLS
+packet capture; WebSocket wire fragmentation and PING/PONG frames are outside
+the message interface.
+
+New installations use `~/Library/Application Support/Model Monitor`; existing
+profiles retain their previous folder. Archives rotate by date and size with
+**no automatic deletion**. After stopping the proxy, you can select an empty
+data folder in Settings; existing data is copied and the old folder is retained.
+Application data stays outside the app bundle, so rebuilding does not erase it.
+
+Request and response models are counted separately. Response IDs are
+deduplicated across streaming events, and dates use **Asia/Hong_Kong**.
+One chat turn can produce multiple requests. A reported model name is the
+captured field, not independent verification of the underlying model weights.
+
+## Documentation and development
+
+- [Operating guide](src/README.md): everyday controls, packet viewing and exports.
+- [Storage design](STORAGE.md): archive format, retention, recovery and capture limits.
+- `src/ModelScope.swift`: native SwiftUI/AppKit interface.
+- `src/controller.py`: proxy lifecycle, launch settings and data management.
+- `src/full_capture.py` and `src/traffic_archive.py`: capture and persistence.
+- `src/packet_details.py`: per-record correlation and JSON previews.
+- `tests/`: synthetic unit tests and a separate local integration check.
+
+Run unit tests from the repository root:
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-The optional end-to-end capture check starts temporary local servers and a
-separate test proxy. It currently expects `mitmweb` at `/opt/homebrew/bin/mitmweb`:
+The optional integration check starts temporary local servers and a separate
+test proxy. It currently expects `mitmweb` at `/opt/homebrew/bin/mitmweb`:
 
 ```sh
 python3 tests/test_proxy_capture.py
 ```
 
-Tests generate synthetic traffic and temporary certificates; no real captures
-or credentials are included. Build outputs, previous versions, traffic archives,
-exports, databases, logs, certificates and local settings are ignored by Git.
+Git excludes installers, previous builds, backups, captures, exports, databases,
+logs, certificates, private keys and local settings. The app and its tests use
+synthetic fixtures for validation; no real captured conversation is included.
+Legacy internal identifiers and archive headers remain for compatibility.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). Model Monitor is an independent utility, not an official OpenAI application.

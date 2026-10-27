@@ -1,11 +1,13 @@
-Model Monitor — storage design
+# Storage design
 
-Data root
+## Data folder
 The active folder is shown in Settings. New installations use
 ~/Library/Application Support/Model Monitor. Existing ModelScope and GPT Model Trace profiles remain in their earlier
 Application Support folder until explicitly moved.
 
-Layout
+## Layout
+
+```text
   records.sqlite3                 Lightweight model counts, times and IDs
   journals/*.jsonl                Lightweight model events for recovery
   Captures/YYYY-MM-DD/*.trace     Complete application traffic, append-only
@@ -14,8 +16,9 @@ Layout
   Exports/YYYY-MM-DD/traffic-*/   Offline viewer and full exports
   Exports/YYYY-MM-DD/packet-*/    Per-model-record viewer files
   settings.json                  Proxy launch preferences
+```
 
-Capture scope
+## Capture scope
 The full recorder has no hostname, endpoint, model-name or content filter.
 For parsed HTTP it saves URLs, methods, versions, ordered/repeated headers,
 trailers, status/reason, timing, errors, client/server connection metadata,
@@ -33,7 +36,7 @@ network-level packets, HTTP wire framing, WebSocket original fragmentation,
 or WebSocket PING/PONG frames (mitmproxy forwards but does not expose/store
 those as message events). WebSocket close information is saved at end.
 
-Durability and retention
+## Durability and retention
 The recorder creates a unique session ID on each start. Files are grouped by
 Hong Kong date and rotated after roughly 64 MiB (a single large event may
 exceed that threshold). Nothing is automatically deleted or overwritten.
@@ -45,20 +48,24 @@ an incomplete trailing record, and refuse checksum-corrupted records.
 Rotation writes a new flow context for each continuing flow, avoiding
 repeated copies of all preceding WebSocket messages.
 
-Binary format, version 1
+## Binary format, version 1
 File header: the bytes GPTTRACE followed by 0x01 and a newline.
 Each record contains:
+
+```text
   uint32 big-endian JSON-envelope byte length
   uint64 big-endian payload byte length
   UTF-8 JSON envelope
   unmodified payload bytes
   32-byte SHA-256 digest of envelope bytes followed by payload bytes
+```
+
 The envelope includes version, session, monotonic sequence within the session,
 Unix timestamp, event kind and flow ID when applicable. Binary values in
 metadata use {"$bytes_base64":"..."}. HTTP body events carry their byte offset;
 full payload bytes remain binary on disk rather than growing by base64 encoding.
 
-Viewing and export
+## Viewing and export
 Open saved traffic uses the selected date to identify flows, then includes
 their saved events from every date. This preserves long connections crossing
 midnight. It writes a fresh export directory with an offline index.html,
@@ -71,7 +78,7 @@ and limits preview length only. Complete linked files are never truncated.
 The browser never replays captured traffic. No external service receives it.
 For command-line export, use controller.py export-traffic --date YYYY-MM-DD.
 
-Per-record viewing
+## Per-record viewing
 Click a model row to show its own saved request/response content. The helper
 command is controller.py packet-detail --mode requests|responses --id RECORD_ID.
 For WebSockets, response IDs and output item IDs select individual messages.
@@ -84,7 +91,7 @@ Previews are bounded; raw payload files remain complete. packet-* files are
 derived views and can be recreated from the original archives. No original
 archive is changed. Old metadata-only records cannot produce missing bodies.
 
-TLS diagnostics
+## TLS diagnostics
 capture-health.json stores a proxy session ID and per-host failure timestamps,
 latest error, incident start and recovery timestamp. The full archive still
 retains the original TLS events. Recent repeated unresolved failures can show
@@ -92,7 +99,7 @@ one alert per incident; stale warnings, stopped proxies, short bursts and
 recovered connections do not. A successful handshake clears failures for that
 host only. Alert IDs remembered by the desktop UI are bounded to the last 100.
 
-Privacy and movement
+## Privacy and moving data
 No fields are redacted in full archives or exports. These files contain the
 user's prompts, responses and any credentials traversing the proxy. Archive
 folders are 0700, files are 0600, and exports have the same permissions. This
@@ -103,18 +110,19 @@ archives, journals, exports and settings, backs up SQLite consistently, changes
 the location preference, and leaves the old directory as a backup. A target
 must be empty. With a large archive, copying and exporting can take time.
 
-Upgrade boundary
-Full capture starts with a proxy launched by version 1.2.0 or later. Merely
-opening the new GUI does not upgrade an already-running proxy worker. Stop
-and start that managed proxy from the new app. Old statistics are kept, but
-missing historical request/response text cannot be reconstructed.
+## Capture availability
+Full capture requires a proxy worker that loads the full recording addon.
+Opening a newer desktop window does not replace an already-running worker.
+After finishing active work, stop and start that managed proxy from the new
+app. Existing statistics remain available, but missing historical bodies
+cannot be reconstructed.
 
-References
-https://docs.mitmproxy.org/stable/api/events.html
-https://docs.mitmproxy.org/stable/concepts/protocols/
-https://docs.mitmproxy.org/stable/concepts/options/#store_streamed_bodies
+## References
+- [mitmproxy event hooks](https://docs.mitmproxy.org/stable/api/events.html)
+- [mitmproxy protocol support](https://docs.mitmproxy.org/stable/concepts/protocols/)
+- [Streamed-body retention](https://docs.mitmproxy.org/stable/concepts/options/#store_streamed_bodies)
 
-JSON previews
+## JSON previews
 Large JSON prefixes are indented without requiring a complete closing structure.
 Quoted content and escapes are preserved, and no missing closing tokens are
 invented. Formatting is also bounded to 64 KiB. A cut UTF-8 character at the
