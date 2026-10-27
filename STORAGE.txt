@@ -1,0 +1,122 @@
+Model Monitor — storage design
+
+Data root
+The active folder is shown in Settings. New installations use
+~/Library/Application Support/Model Monitor. Existing ModelScope and GPT Model Trace profiles remain in their earlier
+Application Support folder until explicitly moved.
+
+Layout
+  records.sqlite3                 Lightweight model counts, times and IDs
+  journals/*.jsonl                Lightweight model events for recovery
+  Captures/YYYY-MM-DD/*.trace     Complete application traffic, append-only
+  capture-health.json             Model recorder diagnostics
+  archive-health.json             Full recorder readiness and errors
+  Exports/YYYY-MM-DD/traffic-*/   Offline viewer and full exports
+  Exports/YYYY-MM-DD/packet-*/    Per-model-record viewer files
+  settings.json                  Proxy launch preferences
+
+Capture scope
+The full recorder has no hostname, endpoint, model-name or content filter.
+For parsed HTTP it saves URLs, methods, versions, ordered/repeated headers,
+trailers, status/reason, timing, errors, client/server connection metadata,
+and exact received body bytes. Content-Encoding is preserved, so a gzip body
+is still gzip in its .bin file. Chunks are persisted before the stream callback
+returns the same bytes for forwarding. SSE chunks are saved before completion.
+WebSocket text and binary messages are stored with the entire payload, time,
+direction, opcode and message index. TCP/UDP payload events and DNS state are
+also recorded if those protocols are exposed by the configured proxy mode.
+CONNECT and connection/TLS success/failure events are included.
+
+This captures the application data mitmproxy can parse/decrypt. It does not
+capture unrelated direct traffic, TLS plaintext after a failed handshake,
+network-level packets, HTTP wire framing, WebSocket original fragmentation,
+or WebSocket PING/PONG frames (mitmproxy forwards but does not expose/store
+those as message events). WebSocket close information is saved at end.
+
+Durability and retention
+The recorder creates a unique session ID on each start. Files are grouped by
+Hong Kong date and rotated after roughly 64 MiB (a single large event may
+exceed that threshold). Nothing is automatically deleted or overwritten.
+Every archive record is appended and fsynced. A write/serialization failure
+stops the proxy, writes a diagnostic when possible, and exits with code 74.
+Previously committed records survive a proxy crash; data not yet received
+or not yet exposed by mitmproxy cannot be saved. Readers report and ignore
+an incomplete trailing record, and refuse checksum-corrupted records.
+Rotation writes a new flow context for each continuing flow, avoiding
+repeated copies of all preceding WebSocket messages.
+
+Binary format, version 1
+File header: the bytes GPTTRACE followed by 0x01 and a newline.
+Each record contains:
+  uint32 big-endian JSON-envelope byte length
+  uint64 big-endian payload byte length
+  UTF-8 JSON envelope
+  unmodified payload bytes
+  32-byte SHA-256 digest of envelope bytes followed by payload bytes
+The envelope includes version, session, monotonic sequence within the session,
+Unix timestamp, event kind and flow ID when applicable. Binary values in
+metadata use {"$bytes_base64":"..."}. HTTP body events carry their byte offset;
+full payload bytes remain binary on disk rather than growing by base64 encoding.
+
+Viewing and export
+Open saved traffic uses the selected date to identify flows, then includes
+their saved events from every date. This preserves long connections crossing
+midnight. It writes a fresh export directory with an offline index.html,
+events.jsonl (complete payload_base64 plus exact envelope), per-flow header
+JSON and body .bin files, messages.jsonl, and complete state.json metadata.
+Text WebSocket messages also have a full payload_text field for direct reading;
+payload_base64 remains the authoritative lossless representation.
+The HTML preview escapes captured markup, disallows external content/scripts,
+and limits preview length only. Complete linked files are never truncated.
+The browser never replays captured traffic. No external service receives it.
+For command-line export, use controller.py export-traffic --date YYYY-MM-DD.
+
+Per-record viewing
+Click a model row to show its own saved request/response content. The helper
+command is controller.py packet-detail --mode requests|responses --id RECORD_ID.
+For WebSockets, response IDs and output item IDs select individual messages.
+A request is paired only when one request is pending on that flow; concurrent
+ambiguous requests are not guessed. Unidentifiable events remain in the full
+archive/export. HTTP details include that flow's complete saved body and state.
+The response_flows SQLite table remembers response-to-flow links for new events;
+older records can recover those links from their existing metadata journals.
+Previews are bounded; raw payload files remain complete. packet-* files are
+derived views and can be recreated from the original archives. No original
+archive is changed. Old metadata-only records cannot produce missing bodies.
+
+TLS diagnostics
+capture-health.json stores a proxy session ID and per-host failure timestamps,
+latest error, incident start and recovery timestamp. The full archive still
+retains the original TLS events. Recent repeated unresolved failures can show
+one alert per incident; stale warnings, stopped proxies, short bursts and
+recovered connections do not. A successful handshake clears failures for that
+host only. Alert IDs remembered by the desktop UI are bounded to the last 100.
+
+Privacy and movement
+No fields are redacted in full archives or exports. These files contain the
+user's prompts, responses and any credentials traversing the proxy. Archive
+folders are 0700, files are 0600, and exports have the same permissions. This
+is local access control, not application-level encryption. Use normal macOS
+disk protection for encryption at rest if needed.
+Changing Data folder requires stopping the managed proxy. The app copies all
+archives, journals, exports and settings, backs up SQLite consistently, changes
+the location preference, and leaves the old directory as a backup. A target
+must be empty. With a large archive, copying and exporting can take time.
+
+Upgrade boundary
+Full capture starts with a proxy launched by version 1.2.0 or later. Merely
+opening the new GUI does not upgrade an already-running proxy worker. Stop
+and start that managed proxy from the new app. Old statistics are kept, but
+missing historical request/response text cannot be reconstructed.
+
+References
+https://docs.mitmproxy.org/stable/api/events.html
+https://docs.mitmproxy.org/stable/concepts/protocols/
+https://docs.mitmproxy.org/stable/concepts/options/#store_streamed_bodies
+
+JSON previews
+Large JSON prefixes are indented without requiring a complete closing structure.
+Quoted content and escapes are preserved, and no missing closing tokens are
+invented. Formatting is also bounded to 64 KiB. A cut UTF-8 character at the
+preview boundary does not turn valid text into a binary preview. Original
+captured files are never changed. The native text reader wraps long lines.
