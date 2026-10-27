@@ -80,8 +80,38 @@ Mitmproxy creates a CA on first use. The two files have different purposes:
 | `~/.mitmproxy/mitmproxy-ca-cert.pem` | Public CA certificate: import this into Keychain Access and select it in Model Monitor. |
 | `~/.mitmproxy/mitmproxy-ca.pem` | CA plus private key: keep this private and in the same folder so the proxy can use it. |
 
-Trust only the CA created for your own proxy. Do not upload either your private
-key or captured traffic to GitHub. See [mitmproxy's certificate guide](https://docs.mitmproxy.org/stable/concepts/certificates/).
+#### Local storage and the scope of trust
+
+In the default setup above, mitmproxy generates the CA and private key on your
+Mac and stores them in `~/.mitmproxy`. The local mitmproxy process reads the
+private key to sign certificates for proxied connections. The setup does not
+upload that key to mitmproxy's developers or to this repository; installing and
+trusting the certificate are local operations. Each newly generated CA is
+unique, rather than a shared key supplied to every user.
+See [mitmproxy's certificate guide](https://docs.mitmproxy.org/stable/concepts/certificates/).
+
+The public certificate alone cannot sign new certificates. Protect
+`mitmproxy-ca.pem`, which contains the private key: do not share it, commit it,
+or include it in exported support files. Restrictive file permissions such as
+`600` help prevent access by other ordinary accounts, but do not protect it from
+malware running with your own account's permissions or administrator access.
+
+**System-keychain SSL trust is broader than the app being monitored.** Other
+clients using the same trust settings may also accept certificates issued by
+this CA. If someone obtains its private key and can intercept or redirect your
+connections, they may be able to impersonate HTTPS sites for those clients.
+The proxy's localhost binding and upstream TLS checks do not narrow this CA
+trust to GPT alone.
+
+Stopping the proxy or quitting Model Monitor **does not revoke CA trust**.
+When you no longer need this setup, remove its custom trust and imported CA
+from the keychain where you installed it, using Keychain Access. Change only
+the certificate belonging to your proxy. See
+[Apple's certificate trust settings](https://support.apple.com/guide/keychain-access/change-the-trust-settings-of-a-certificate-kyca11871/mac).
+
+Trust only a CA you control. Captured traffic also contains sensitive data;
+keep both private keys and real captures out of GitHub. This repository ignores
+certificate/key files and capture outputs by default.
 
 #### Trust the CA using Keychain Access
 
