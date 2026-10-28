@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>模型记录</title><link rel="stylesheet" href="popup.css"></head>
+<body><header><div class="eyebrow">CHATGPT / MODEL TRACKER</div><h1>每一次对话，模型有迹可查。</h1>
+<p>记录接口公开的模型字段。未公开时显示未知；字段值不等于经验证的后台模型身份。</p></header>
+<nav><button id="json">导出 JSON</button><button id="csv">导出 CSV</button><button id="clear" class="quiet">清空记录</button></nav>
+<div id="summary" role="status"></div><main id="records"></main>
+<footer>仅保存在此浏览器 · 最近 300 次请求 · 不保存聊天正文<br>安装后刷新 ChatGPT，再发送新消息。仅支持网页 fetch 对话接口；旧对话不会补录。</footer>
+<script src="export.js"></script><script src="popup.js"></script></body></html>

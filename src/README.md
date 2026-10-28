@@ -4,6 +4,20 @@ For first-time installation, building the app and trusting its proxy certificate
 start with the [main README](https://github.com/Ooo0ption/ModelMonitor#installation).
 This guide covers the app after setup.
 
+## First launch with the complete package
+
+The package includes mitmproxy and the helper's Python runtime. **Set up capture**
+checks the runtime, local certificate and macOS SSL trust. Use **Prepare Local
+Certificate** to create a CA on your Mac, then **Trust Certificate…** to review
+and explicitly approve SSL trust for your current macOS account. This can affect
+other apps using that trust domain. The installer never changes certificate trust.
+You can return to this screen using **Capture setup** or **Finish setup**.
+
+New CA files live in `CertificateAuthority` inside the data folder. An existing
+selected CA is reused. Keep the private `mitmproxy-ca.pem` file private; the
+public `mitmproxy-ca-cert.pem` is the file imported into Keychain. **Open in
+Keychain** offers a manual alternative. Closing the app does not revoke trust.
+
 ## Start and stop
 
 Click **Start Proxy & GPT** to start the managed proxy and launch the desktop app
@@ -35,8 +49,8 @@ prompt text or unrelated metadata do not count as model calls.
 ## Inspect a packet
 
 Switch between **Request**, **Response** and **Connection**, then select an event.
-**Copy** copies the displayed preview; the folder button reveals its complete
-payload file in Finder. **Refresh packets** reloads events saved since opening
+**Copy** copies the displayed preview; the folder button reveals its saved
+payload or summary file in Finder. **Refresh packets** reloads events saved since opening
 the page. **Model activity** returns to the list.
 
 JSON previews are indented even when shortened, and long lines wrap. Input
@@ -49,7 +63,10 @@ WebSocket records are correlated using response and output-item IDs. A request
 is paired only when one request is pending on that connection; ambiguous matches
 are omitted from the per-record view. The full connection remains available
 through **Open saved traffic**. HTTP records show the saved exchange for their
-flow. Historical metadata-only records show a notice when no full body exists.
+flow. Astra and codex-auto-review records show **Summary-only storage**: original
+prompt, generated text and tool contents were intentionally omitted. Other models
+retain full payloads. Historical metadata-only records also show a notice when no
+full body exists.
 
 ## Export and open data
 
@@ -57,13 +74,13 @@ flow. Historical metadata-only records show a notice when no full body exists.
 | --- | --- |
 | **Export CSV** | Saves the day's request/response summary files under `Exports/<date>/`. |
 | **Open capture viewer** | Opens the live mitmweb view for the running proxy. |
-| **Open saved traffic** | Creates an offline HTML index, full JSONL events, original body files and connection metadata. Works after the proxy has stopped. |
+| **Open saved traffic** | Creates an offline HTML index, retained JSONL events, body or summary files and connection metadata. Works after the proxy has stopped. |
 | **Open data folder** | Opens the active data folder, including archives and diagnostic logs. |
 | **Import saved flows** | Imports model summaries from a native mitmproxy flows file; it does not create historical full archives. |
 
 Exports for long connections assemble their saved events across dates. Offline
 HTML previews escape captured markup and do not execute captured scripts or
-replay requests. Linked files contain the complete captured payloads.
+replay requests. Full entries contain the exact captured payloads; summary entries are labelled.
 
 ## Settings and data location
 
@@ -76,6 +93,8 @@ Earlier ModelScope and GPT Model Trace profiles keep their existing folder until
 you choose a new one. To move data, select an empty directory outside the `.app`
 bundle and click **Save**. The app copies records, archives, exports and settings,
 then switches to the new folder. The previous folder remains as a backup.
+An internal certificate folder moves with the data and its selected path is
+updated; an external selected certificate stays at its original location.
 **Use standard macOS folder** selects the current default.
 
 The selected location is remembered in
@@ -95,6 +114,10 @@ verification enabled. Follow the certificate setup and troubleshooting steps in
 the main README if a client rejects the proxy's certificate.
 
 During capture, recent repeated unresolved TLS failures can trigger an alert.
+The sidebar distinguishes **Proxy is recording** from **Recording is not active**.
+A missing recording plugin triggers a recording alert. Workers started by
+version 1.4.1 or later stop the proxy if recording fails its continuous health
+check; replacing the installed app does not unload the private runtime copy.
 Single bursts, stopped proxies, stale incidents and recovered connections do not
 produce a persistent warning. Each incident is shown once. `capture-health.json`
 retains diagnostic timestamps and errors; `archive-health.json` records archive
@@ -102,12 +125,25 @@ readiness. `proxy.log` contains proxy process output.
 
 ## Retention and limits
 
-Every parsed application flow exposed by the managed proxy is archived without
-a hostname or model filter. This includes request/response contents, prompts,
-headers, cookies and credentials. Nothing is redacted. Files rotate by Hong Kong
-date and roughly 64 MiB without automatic deletion. Recording failures stop the
-proxy rather than forwarding unsaved traffic. Live flow retention in mitmweb
-also consumes memory.
+Astra-family responses and `codex-auto-review` use summary-only storage. Summaries
+keep model names, IDs, times, status, available token usage and byte/checksum
+metadata; they omit prompts, generated text and tool contents. All other models,
+including Luna, retain full request and response bytes. The response model is
+authoritative. Requests wait in a durable temporary queue until that model is
+known. Unknown or ambiguous traffic remains full. Shared WebSocket connections
+are classified per response rather than dropped as a whole.
+
+New archives use transparent gzip compression. The app can read both old `.trace`
+and new `.trace.gz` files, and restores exact retained bytes for viewing/export.
+Files rotate by Hong Kong date and roughly 64 MiB of stored data. No files are
+automatically deleted. Full records and shared connection metadata can contain
+credentials. Recording failures stop the proxy. Live flow retention in mitmweb
+still holds full content and consumes memory.
+
+Updating the app does not replace a running worker. Finish generation, then stop
+and start the proxy to apply the new rules. The status note shows the active
+policy. Historical archives, previous exports and recovery snapshots keep their
+old content until separately compacted or removed.
 
 Failed TLS handshakes cannot produce decrypted bodies. IP/TLS wire packets,
 HTTP wire framing and WebSocket fragmentation/PING/PONG frames are not captured

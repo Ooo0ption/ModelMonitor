@@ -1,12 +1,13 @@
-"""Capture every application flow exposed by mitmproxy, without model filters."""
+"""Capture proxied traffic with model-specific payload retention."""
 import json
 import os
+import secrets
 from pathlib import Path
 import sys
 import time
 
 from mitmproxy import ctx
-from traffic_archive import ArchiveWriter
+from retention import SelectiveArchiveWriter, POLICY
 
 
 class FullCapture:
@@ -19,11 +20,17 @@ class FullCapture:
         self.root = Path(os.environ['MODELSCOPE_DATA_DIR'])
         self.health = {'archive_version': 1, 'ready': False, 'error': ''}
         try:
-            self.writer = ArchiveWriter(self.root, os.environ.get('MODELSCOPE_CAPTURE_SESSION'))
+            worker_session = os.environ.get('MODELSCOPE_CAPTURE_SESSION')
+            # A script can be loaded again in the same proxy process. Give
+            # each recorder a new archive namespace, preserving existing files.
+            archive_session = (worker_session or str(time.time_ns())) + '-' + secrets.token_hex(6)
+            self.writer = SelectiveArchiveWriter(self.root, archive_session)
             self.writer.write({'kind': 'session.start', 'time': time.time(),
-                               'scope': 'all mitmproxy application flows; HTTP bodies and WebSocket/TCP/UDP messages'})
+                               'scope': 'Astra and codex-auto-review summaries; other and unclassified traffic retained in full',
+                               'storage_policy': POLICY})
             ctx.options.update(store_streamed_bodies=True)
-            self.health.update(ready=True, session=self.writer.session)
+            self.health.update(ready=True, session=worker_session or self.writer.session,
+                               archive_session=self.writer.session, storage_policy=POLICY)
             self.save_health()
         except Exception as exc:
             self.fatal(exc)

@@ -6,7 +6,14 @@ import sys
 import time
 from mitmproxy import ctx
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+source = Path(__file__).resolve().parent
+sys.path.insert(0, str(source))
+# Switching to a new immutable runtime must not reuse modules from a previous
+# app bundle. mitmproxy otherwise caches imports across script reloads.
+for name in ('full_capture', 'retention', 'traffic_archive', 'capture_diagnostics'):
+    module = sys.modules.get(name)
+    if module and Path(module.__file__).resolve().parent != source:
+        sys.modules.pop(name, None)
 from full_capture import FullCapture
 from capture_diagnostics import tls_host, record_failure, record_success
 

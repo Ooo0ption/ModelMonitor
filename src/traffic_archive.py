@@ -7,12 +7,14 @@ The frozen mitmproxy runtime has no sqlite3, so the capture writer uses files.
 import base64
 import datetime as dt
 import hashlib
+import gzip
 import html
 import json
 import os
 from pathlib import Path
 import struct
 import time
+import zlib
 
 MAGIC = b'GPTTRACE\x01\n'
 HEADER = struct.Struct('>IQ')
@@ -41,7 +43,7 @@ def date_key(timestamp=None):
 
 
 class ArchiveWriter:
-    def __init__(self, root, session=None, rotate_bytes=ROTATE_BYTES):
+    def __init__(self, root, session=None, rotate_bytes=ROTATE_BYTES, compress=False):
         self.root = Path(root) / 'Captures'
         self.session = session or str(time.time_ns()) + '-' + str(os.getpid())
         self.rotate_bytes = rotate_bytes
@@ -51,8 +53,15 @@ class ArchiveWriter:
         self.size = 0
         self.sequence = 0
         self.seen = set()
+        self.compress = compress
+        self.compressor = None
 
     def _write_bytes(self, data):
+        if self.compressor is not None:
+            data = self.compressor.compress(data)
+        self._write_stored(data)
+
+    def _write_stored(self, data):
         remaining = memoryview(data)
         while remaining:
             count = os.write(self.fd, remaining)
@@ -71,6 +80,8 @@ class ArchiveWriter:
         self._write_bytes(encoded)
         self._write_bytes(payload)
         self._write_bytes(digest.digest())
+        if self.compressor is not None:
+            self._write_stored(self.compressor.flush(zlib.Z_SYNC_FLUSH))
         os.fsync(self.fd)
 
     def write(self, event, payload=b'', context=None):
@@ -83,8 +94,9 @@ class ArchiveWriter:
             os.chmod(self.root, 0o700)
             os.chmod(folder, 0o700)
             self.segment += 1
-            self.path = folder / (self.session + '-%06d.trace' % self.segment)
+            self.path = folder / (self.session + '-%06d.trace' % self.segment + ('.gz' if self.compress else ''))
             self.fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            self.compressor = zlib.compressobj(3, zlib.DEFLATED, 31) if self.compress else None
             self.day, self.size, self.seen = day, 0, set()
             self._write_bytes(MAGIC)
         fid = event.get('flow_id')
@@ -95,6 +107,9 @@ class ArchiveWriter:
 
     def close(self):
         if self.fd is not None:
+            if self.compressor is not None:
+                self._write_stored(self.compressor.flush(zlib.Z_FINISH))
+                self.compressor = None
             os.fsync(self.fd)
             os.close(self.fd)
             self.fd = None
@@ -106,20 +121,52 @@ def iter_records(path, warnings=None):
         if warnings is not None:
             warnings.append(str(path) + ': incomplete final record (active write or interrupted capture)')
 
-    with Path(path).open('rb') as stream:
-        if stream.read(len(MAGIC)) != MAGIC:
+    compressed = str(path).endswith('.gz')
+    opener = gzip.open if compressed else open
+    with opener(path, 'rb') as stream:
+        def read_available(size):
+            # GzipFile.read() can discard a partial result when a live stream
+            # has no footer yet. read1() preserves that prefix for validation.
+            if not compressed:
+                return stream.read(size)
+            chunks = []; remaining = size
+            while remaining:
+                try:
+                    block = stream.read1(min(remaining, 1024 * 1024))
+                except EOFError:
+                    break
+                if not block: break
+                chunks.append(block); remaining -= len(block)
+            return b''.join(chunks)
+
+        if read_available(len(MAGIC)) != MAGIC:
             raise ValueError('Unsupported traffic archive: ' + str(path))
-        end = os.fstat(stream.fileno()).st_size
-        while stream.tell() < end:
-            header = stream.read(HEADER.size)
+        end = None if compressed else os.fstat(stream.fileno()).st_size
+        while end is None or stream.tell() < end:
+            try:
+                header = read_available(HEADER.size)
+            except EOFError:
+                # gzip has no final footer while the writer is live. Every
+                # yielded record still had its own complete SHA-256 checksum.
+                return
+            except (OSError, zlib.error) as error:
+                raise ValueError('Archive compression/checksum mismatch: '+str(path)) from error
+            if not header: return
             if len(header) != HEADER.size:
                 incomplete(); return
             metadata_size, payload_size = HEADER.unpack(header)
-            if metadata_size + payload_size + 32 > end - stream.tell():
+            if end is not None and metadata_size + payload_size + 32 > end - stream.tell():
                 incomplete(); return
-            metadata = stream.read(metadata_size)
-            payload = stream.read(payload_size)
-            checksum = stream.read(32)
+            try:
+                metadata = read_available(metadata_size)
+                payload = read_available(payload_size)
+                checksum = read_available(32)
+            except EOFError:
+                incomplete(); return
+            except (OSError, zlib.error) as error:
+                raise ValueError('Archive compression/checksum mismatch: '+str(path)) from error
+            if len(metadata)!=metadata_size or len(payload)!=payload_size or len(checksum)!=32:
+                incomplete(); return
             digest = hashlib.sha256(metadata)
             digest.update(payload)
             if digest.digest() != checksum:
@@ -131,8 +178,8 @@ def archive_files(root, day=None):
     folder = Path(root) / 'Captures'
     if day is not None:
         day = dt.date.fromisoformat(day).isoformat()
-        return sorted((folder / day).glob('*.trace'))
-    return sorted(folder.glob('*/*.trace'))
+        return sorted([*(folder / day).glob('*.trace'), *(folder / day).glob('*.trace.gz')])
+    return sorted([*folder.glob('*/*.trace'), *folder.glob('*/*.trace.gz')])
 
 
 def summary(root, day):
@@ -186,10 +233,11 @@ def export_day(root, day):
                     dirname = hashlib.sha256(fid.encode()).hexdigest()[:24]
                     folder = output / dirname
                     folder.mkdir(mode=0o700)
-                    flows[fid] = {'folder': folder, 'state': {}, 'time': event['time'], 'messages': 0,
+                    flows[fid] = {'folder': folder, 'state': {}, 'time': event['time'], 'messages': 0, 'summaries': 0,
                                   'request_complete': False, 'response_complete': False, 'ended': False}
                 info = flows[fid]
                 kind = event['kind']
+                if event.get('retention') == 'summary': info['summaries'] += 1
                 if event.get('state'):
                     info['state'].update(event['state'])
                 for key in ('connection', 'client', 'server'):
@@ -206,7 +254,10 @@ def export_day(root, day):
                 if kind in ('http.request.end', 'http.response.end'):
                     side = kind.split('.')[1]
                     info[side + '_complete'] = True
-                    (info['folder'] / (side + '.body.bin')).touch(exist_ok=True)
+                    if event.get('retention') != 'summary': (info['folder'] / (side + '.body.bin')).touch(exist_ok=True)
+                if kind in ('http.request.summary', 'http.response.summary'):
+                    side = kind.split('.')[1]
+                    (info['folder'] / (side + '.summary.json')).write_bytes(payload)
                 if kind.endswith('.end'):
                     info['ended'] = True
                 if kind in ('websocket.message', 'tcp.message', 'udp.message'):
@@ -234,6 +285,9 @@ def export_day(root, day):
             (info['folder'] / (side + '.json')).write_text(json.dumps(friendly, ensure_ascii=False, indent=2), encoding='utf-8')
             parts.append('<h2>' + side.title() + '</h2><p>Body finished: ' + str(info[side + '_complete']) + '</p>')
             parts.append('<pre>' + html.escape(json.dumps(friendly, ensure_ascii=False, indent=2)) + '</pre>')
+            summary = info['folder'] / (side + '.summary.json')
+            if summary.exists():
+                parts.append('<p>Summary-only retention: the original body was intentionally omitted.</p><p><a href="'+summary.name+'">Saved packet summary</a></p>')
             body = info['folder'] / (side + '.body.bin')
             if body.exists():
                 parts.append('<p><a href="' + body.name + '" download>Complete body (' + str(body.stat().st_size) + ' bytes)</a></p>')
@@ -241,7 +295,8 @@ def export_day(root, day):
                     preview = stream.read(16384)
                 parts.append('<p><small>First 16 KiB preview; saved bytes retain any Content-Encoding.</small></p><pre>' + html.escape(preview.decode('utf-8', 'replace')) + '</pre>')
         if info['messages']:
-            parts.append('<h2>Messages</h2><p><a href="messages.jsonl">All ' + str(info['messages']) + ' complete messages (JSONL, base64 payloads)</a></p>')
+            parts.append('<h2>Messages</h2><p><a href="messages.jsonl">All ' + str(info['messages']) + ' saved messages and summaries (JSONL)</a></p>')
+            if info['summaries']: parts.append('<p>Entries marked summary contain metadata rather than the original prompt, output or tool content.</p>')
             with (info['folder'] / 'messages.jsonl').open(encoding='utf-8') as stream:
                 for i, line in enumerate(stream):
                     if i >= 20:
@@ -249,15 +304,15 @@ def export_day(root, day):
                     record = json.loads(line)
                     payload = base64.b64decode(record.pop('payload_base64'))
                     parts.append('<details><summary>' + html.escape(record['kind'] + ' / ' + record.get('direction', '')) + '</summary><pre>' + html.escape(payload[:16384].decode('utf-8', 'replace')) + '</pre></details>')
-            parts.append('<small>Preview: first 20 messages, up to 16 KiB each. The linked file contains every complete payload.</small>')
+            parts.append('<small>Preview: first 20 entries, up to 16 KiB each. The linked file contains every retained entry.</small>')
         (info['folder'] / 'state.json').write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
         parts.append('<p><a href="state.json">Complete saved connection and flow metadata</a></p>')
         (info['folder'] / 'index.html').write_text(_page(title, ''.join(parts)), encoding='utf-8')
         stamp = dt.datetime.fromtimestamp(info['time'], ZONE).isoformat(timespec='milliseconds')
         rows.append('<tr><td>' + html.escape(stamp) + '</td><td><a href="' + info['folder'].name + '/index.html">' + html.escape(title) + '</a></td><td>' + str(info['messages']) + '</td></tr>')
-    notes = ('<p>Full flows with events on ' + day + ' (Hong Kong), including saved portions from other dates. '
-             'Bodies, credentials and messages are included. This export is local and does not contact the captured hosts.</p>'
-             '<p><a href="events.jsonl">All events and complete payloads (JSONL)</a></p>'
+    notes = ('<p>Retained flows with events on ' + day + ' (Hong Kong), including saved portions from other dates. '
+             'Full entries may include credentials; summary entries deliberately omit original bodies. This export is local and does not contact the captured hosts.</p>'
+             '<p><a href="events.jsonl">All saved events, payloads and summaries (JSONL)</a></p>'
              '<p>HTTP wire framing and WebSocket control frames are not exposed by mitmproxy. Missing final events indicate an unfinished or interrupted flow.</p>')
     if warnings:
         notes += '<pre>' + html.escape('\n'.join(sorted(set(warnings)))) + '</pre>'

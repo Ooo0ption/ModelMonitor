@@ -51,6 +51,24 @@ class ArchiveTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'checksum'):
                 list(iter_records(path))
 
+    def test_compressed_archives_remain_readable_while_recording(self):
+        with tempfile.TemporaryDirectory() as folder:
+            writer=ArchiveWriter(folder,'compressed',compress=True)
+            body=b'lossless payload '*10000
+            writer.write({'kind':'http.response.body','offset':0},body)
+            path=archive_files(folder)[0]
+            warnings=[]
+            records=list(iter_records(path,warnings))
+            self.assertEqual(records[0][1],body)
+            self.assertFalse(warnings)  # Complete records do not require a final gzip footer.
+            writer.close()
+            warnings=[];records=list(iter_records(path,warnings))
+            self.assertEqual(records[0][1],body);self.assertFalse(warnings)
+            self.assertLess(path.stat().st_size,len(body)//5)
+            with path.open('r+b') as stream:
+                stream.seek(-8,2);stream.write(b'broken!!')
+            with self.assertRaisesRegex(ValueError,'checksum'):list(iter_records(path))
+
 
 if __name__ == '__main__':
     unittest.main()

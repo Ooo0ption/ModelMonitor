@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import Security
 
 struct CaptureRow: Decodable, Identifiable {
     let id: String
@@ -44,6 +45,7 @@ struct DailyReport: Decodable {
 }
 struct ProxyState: Decodable {
     let running: Bool
+    let recording: Bool?
     let proxy_port: Int?
     let web_port: Int?
 }
@@ -86,6 +88,8 @@ struct ArchiveSummary: Decodable {
     @Published var packet: PacketDetail?
     @Published var packetError: String?
     @Published var activeIssue: CaptureIssue?
+    @Published var showSetup = false
+    private var checkedSetup = false
     private var pendingPacket: (CaptureRow, String)?
     private var packetMode = "requests"
     private var timer: Timer?
@@ -108,6 +112,11 @@ struct ArchiveSummary: Decodable {
     }
     var total: Int { models.values.reduce(0,+) }
     var proxyRunning: Bool { snapshot?.proxy.running ?? false }
+    var recording: Bool { proxyRunning && snapshot?.proxy.recording == true }
+    var needsSetup: Bool {
+        guard let dependencies = snapshot?.dependencies else { return false }
+        return dependencies["mitmweb"] != true || dependencies["certificate"] != true || dependencies["certificate_trusted"] != true
+    }
     var gptApplications: [NSRunningApplication] {
         guard let path = snapshot?.settings.gpt_app else { return [] }
         return NSWorkspace.shared.runningApplications.filter { $0.bundleURL?.path == path && !$0.isTerminated }
@@ -125,12 +134,14 @@ struct ArchiveSummary: Decodable {
         if busy { return }
         busy = true
         let script = backendURL.path
+        let helper = resource.appendingPathComponent("Helper/model-monitor-helper").path
+        let hasHelper = FileManager.default.isExecutableFile(atPath: helper)
         DispatchQueue.global(qos: .userInitiated).async {
             var result: [String: Any]
             do {
                 let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-                process.arguments = [script] + arguments
+                process.executableURL = URL(fileURLWithPath: hasHelper ? helper : "/usr/bin/python3")
+                process.arguments = hasHelper ? arguments : [script] + arguments
                 var env = ProcessInfo.processInfo.environment
                 env["PYTHONDONTWRITEBYTECODE"] = "1"
                 process.environment = env
@@ -155,7 +166,7 @@ struct ArchiveSummary: Decodable {
                 if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     result = object
                 } else {
-                    result = ["ok": false, "error": "The local helper could not return a result. Check that Python 3 and the app files are available."]
+                    result = ["ok": false, "error": "The local helper could not return a result. Reinstall the complete app package or check proxy.log in the data folder."]
                 }
             } catch {
                 result = ["ok": false, "error": error.localizedDescription]
@@ -184,6 +195,10 @@ struct ArchiveSummary: Decodable {
                   let data = try? JSONSerialization.data(withJSONObject: result),
                   let status = try? JSONDecoder().decode(Snapshot.self, from: data) else { return }
             self.snapshot = status
+            if !self.checkedSetup {
+                self.checkedSetup = true
+                if self.needsSetup { self.showSetup = true }
+            }
             if self.activeIssue == nil {
                 var shown = UserDefaults.standard.stringArray(forKey: "shownCaptureIssues") ?? []
                 if let issue = status.capture_issues.first(where: { !shown.contains($0.id) }) {
@@ -229,6 +244,7 @@ struct ArchiveSummary: Decodable {
     }
 
     func startProxy(thenLaunch: Bool = false) {
+        if needsSetup { showSetup = true; return }
         notice = "Starting proxy…"; error = nil
         run(["start"]) { result in
             guard result["ok"] as? Bool == true else { return }
@@ -238,6 +254,7 @@ struct ArchiveSummary: Decodable {
     }
 
     func launchGPT() {
+        if needsSetup { showSetup = true; return }
         error = nil
         run(["launch-plan"]) { result in
             guard result["ok"] as? Bool == true, let path = result["app"] as? String,
@@ -301,6 +318,61 @@ struct ArchiveSummary: Decodable {
         run(["stop"]) { result in
             if result["ok"] as? Bool == true { self.notice = "Proxy stopped. Your records are saved."; self.refresh() }
         }
+    }
+
+    func prepareSetup() {
+        error = nil; notice = "Preparing the local certificate…"
+        run(["prepare-setup"], timeout: 60) { result in
+            if result["ok"] as? Bool == true {
+                self.notice = "Local certificate is ready. Review and approve SSL trust to continue."
+            }
+            self.refresh()
+        }
+    }
+
+    func trustSetupCertificate() {
+        guard !busy, let path = snapshot?.settings.ca_file else { return }
+        let alert = NSAlert()
+        alert.messageText = "Trust your local proxy certificate?"
+        alert.informativeText = "This allows the proxy to decrypt HTTPS traffic sent through it. SSL trust applies to your macOS account, including other apps using its trust settings. Quitting the proxy does not revoke trust. Keep the private key and saved traffic private. macOS may ask you to authorize this change.\n\nCertificate: \(path)"
+        alert.addButton(withTitle: "Trust for SSL"); alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        busy = true; error = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: String?
+            do {
+                let pem = try String(contentsOfFile: path, encoding: .utf8)
+                let body = pem.replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
+                    .replacingOccurrences(of: "-----END CERTIFICATE-----", with: "")
+                    .components(separatedBy: .whitespacesAndNewlines).joined()
+                guard let der = Data(base64Encoded: body), let certificate = SecCertificateCreateWithData(nil, der as CFData) else {
+                    throw NSError(domain: "ModelMonitor", code: 1, userInfo: [NSLocalizedDescriptionKey: "The selected file is not a valid public CA certificate."])
+                }
+                let attributes: [String: Any] = [kSecClass as String: kSecClassCertificate, kSecValueRef as String: certificate]
+                let imported = SecItemAdd(attributes as CFDictionary, nil)
+                guard imported == errSecSuccess || imported == errSecDuplicateItem else {
+                    throw NSError(domain: NSOSStatusErrorDomain, code: Int(imported))
+                }
+                let trust: [String: Any] = [kSecTrustSettingsPolicy as String: SecPolicyCreateSSL(true, nil),
+                                           kSecTrustSettingsResult as String: NSNumber(value: SecTrustSettingsResult.trustRoot.rawValue)]
+                let result = SecTrustSettingsSetTrustSettings(certificate, .user, [trust] as CFArray)
+                guard result == errSecSuccess else {
+                    throw NSError(domain: NSOSStatusErrorDomain, code: Int(result))
+                }
+            } catch { failure = error.localizedDescription }
+            DispatchQueue.main.async {
+                self.busy = false
+                if let failure = failure {
+                    self.error = "Certificate trust was not completed: \(failure). You can also set SSL trust in Keychain Access."
+                } else { self.notice = "SSL trust saved for your macOS account." }
+                self.refresh()
+            }
+        }
+    }
+
+    func openSetupCertificate() {
+        guard let path = snapshot?.settings.ca_file else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
     func importFlows() {
@@ -472,6 +544,7 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             if let settings = model.snapshot?.settings { SettingsView(model: model, settings: settings) }
         }
+        .sheet(isPresented: $model.showSetup) { CaptureSetupView(model: model) }
     }
 
     var sidebar: some View {
@@ -484,7 +557,7 @@ struct ContentView: View {
                 }
             }.padding(.bottom, 14)
             VStack(alignment: .leading, spacing: 10) {
-                statusLine(model.proxyRunning ? "Proxy is running" : "Proxy is stopped", active: model.proxyRunning)
+                statusLine(model.proxyRunning ? (model.recording ? "Proxy is recording" : "Recording is not active") : "Proxy is stopped", active: model.recording)
                 Text(model.proxyRunning ? "127.0.0.1:\(String(model.snapshot?.proxy.proxy_port ?? 18741))" : "Default port \(String(model.snapshot?.settings.proxy_port ?? 18741))")
                     .font(.system(size: 12)).opacity(0.65).padding(.leading, 17)
                 statusLine(model.gptRunning ? "GPT is running" : "GPT is not running", active: model.gptRunning)
@@ -516,12 +589,9 @@ struct ContentView: View {
                 railButton("Open data folder", icon: "folder", action: model.openData)
             }
             Spacer()
-            if model.snapshot?.dependencies["mitmweb"] == false {
-                Text("mitmweb not found. Choose its location in Settings.")
-                    .font(.system(size: 12)).foregroundStyle(Color.orange)
-            }
+            railButton(model.needsSetup ? "Finish setup" : "Capture setup", icon: "checkmark.shield") { model.showSetup = true }
             railButton("Settings", icon: "gearshape") { showSettings = true }
-            Text("Full requests, responses and messages are saved locally, including credentials. No automatic deletion.")
+            Text("Model summaries and retained packets are saved locally. Full captures may include credentials.")
                 .font(.system(size: 11)).lineSpacing(4).opacity(0.55)
         }.padding(24).frame(width: 234).frame(maxHeight: .infinity).background(ink).foregroundStyle(.white)
     }
@@ -678,6 +748,62 @@ struct PacketTextView: NSViewRepresentable {
             content.setSelectedRange(NSRange(location: 0, length: 0))
             content.scrollToBeginningOfDocument(nil)
             context.coordinator.messageID = messageID
+        }
+    }
+}
+
+struct CaptureSetupView: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) var dismiss
+    var proxyReady: Bool { model.snapshot?.dependencies["mitmweb"] == true }
+    var certificateReady: Bool { model.snapshot?.dependencies["certificate"] == true }
+    var trusted: Bool { model.snapshot?.dependencies["certificate_trusted"] == true }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Set up capture").font(.system(size: 25, weight: .semibold))
+            Text("Prepare your Mac once, then start capturing from the main window.")
+                .foregroundStyle(.secondary)
+            step("Proxy runtime", ready: proxyReady,
+                 detail: model.snapshot?.dependencies["bundled_proxy"] == true ? "Included in this app. No Homebrew installation needed." : "Uses the mitmweb installation selected in Settings.")
+            step("Local certificate", ready: certificateReady,
+                 detail: "Created on your Mac. Your private key stays in your data folder; an existing selected CA is reused.")
+            step("SSL trust", ready: trusted,
+                 detail: "Requires your approval. Trust applies to your macOS account and may affect other apps using its trust settings.")
+            if let path = model.snapshot?.settings.ca_file {
+                Text(path).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if !certificateReady {
+                Button("Prepare Local Certificate", action: model.prepareSetup)
+                    .buttonStyle(.borderedProminent).disabled(model.busy || !proxyReady || model.proxyRunning)
+            } else if !trusted {
+                HStack {
+                    Button("Trust Certificate…", action: model.trustSetupCertificate).buttonStyle(.borderedProminent)
+                    Button("Open in Keychain", action: model.openSetupCertificate)
+                }.disabled(model.busy)
+            }
+            if !proxyReady { Text("Install the complete package or select mitmweb in Settings.").foregroundStyle(.orange) }
+            if model.proxyRunning && !certificateReady { Text("Stop the proxy before preparing a certificate.").foregroundStyle(.orange) }
+            if let error = model.error { Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled) }
+            Text("Captured requests and responses can include credentials. Closing the app keeps the proxy running. Removing SSL trust later is a separate action in Keychain Access.")
+                .font(.footnote).foregroundStyle(.secondary)
+            HStack {
+                if model.busy { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Check Again") { model.refresh() }.disabled(model.busy)
+                Button(trusted && proxyReady ? "Done" : "Later") { dismiss() }.disabled(model.busy)
+            }
+        }.padding(28).frame(width: 590)
+    }
+
+    func step(_ title: String, ready: Bool, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: ready ? "checkmark.circle.fill" : "circle")
+                .foregroundColor(ready ? .green : .secondary).font(.title3)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(detail).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

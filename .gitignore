@@ -20,6 +20,8 @@
 /Exports/
 **/journals/
 *.trace
+*.trace.gz
+**/Pending/
 *.mitm
 *.flow
 *.flows

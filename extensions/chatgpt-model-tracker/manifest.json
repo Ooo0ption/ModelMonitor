@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT Model Tracker · 模型记录",
+  "version": "0.1.0",
+  "minimum_chrome_version": "111",
+  "description": "记录 ChatGPT 请求和回复公开的模型字段，支持本地 CSV / JSON 导出。",
+  "permissions": ["storage"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "popup.html", "default_title": "ChatGPT 模型记录"},
+  "content_scripts": [
+    {"matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"], "js": ["content.js"], "run_at": "document_start"},
+    {"matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"], "js": ["parser.js", "hook.js"], "run_at": "document_start", "world": "MAIN"}
+  ]
+}

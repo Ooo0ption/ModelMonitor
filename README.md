@@ -2,18 +2,73 @@
 
 A native macOS app for viewing model calls captured through a local proxy.
 See daily model counts and timestamps, inspect request/response packets, and
-keep the complete captured traffic on your Mac.
+keep model summaries and selected full traffic on your Mac.
 
-**Start here:** [Install](#installation) → [Set up the certificate](#2-generate-and-trust-the-proxy-certificate) → [Launch and verify](#5-start-capturing-and-check-the-result).
+**Start here:** [Install the complete package](#installation) → [Launch and verify](#5-start-capturing-and-check-the-result).
 
-This repository currently provides source code, not a downloadable installer or
-GitHub Release. The steps below build a local `Model Monitor.app`.
+Download the complete PKG installer or ZIP from
+[GitHub Releases](https://github.com/Ooo0ption/ModelMonitor/releases/latest).
+SHA-256 checksum files are included with each download.
 
 ## Installation
 
+For an **Apple Silicon Mac running macOS 14 or later**, use the complete package:
+
+1. Download and open `ModelMonitor-macOS-arm64.pkg` from GitHub Releases,
+   then follow the macOS installer.
+   It installs **Model Monitor.app** in **Applications**, including mitmproxy and
+   the Python helper runtime. Homebrew, Python and developer tools are not needed
+   on the destination Mac. The desktop app you want to monitor must already exist.
+2. Open **Model Monitor** from Applications. In **Set up capture**, click
+   **Prepare Local Certificate**. This generates a unique CA locally without
+   starting a proxy or changing trust. Existing selected certificates are reused.
+3. Click **Trust Certificate…**, read the explanation and choose **Trust for SSL**
+   only if you want to enable HTTPS capture. macOS may ask for authorization.
+   This sets SSL trust for your **current macOS account**. It is not limited to
+   the monitored app. **Cancel** leaves trust unchanged.
+4. Open **Settings** and select the desktop application to launch. The bundled
+   proxy is detected automatically for new installations. Click **Start Proxy & GPT**.
+
+For new profiles, CA files are stored in
+`~/Library/Application Support/Model Monitor/CertificateAuthority/`. An existing
+complete CA in `~/.mitmproxy`, or an explicitly selected external CA, is preserved.
+The public file is `mitmproxy-ca-cert.pem`; `mitmproxy-ca.pem` also contains the
+private key and must never be shared. Read [the trust scope](#local-storage-and-the-scope-of-trust).
+
+This installer is **unsigned**, and the app is **ad-hoc signed, not notarized**.
+After a blocked first launch, use **System Settings → Privacy & Security →
+Open Anyway** if you trust the download. The installer and app may each need
+approval; see [Apple’s guidance](https://support.apple.com/102445). Intel Macs
+and macOS 13 or earlier are unsupported. Managed Macs may require IT approval,
+and installing into Applications may require administrator authorization.
+It is not a zero-prompt installation. No CA is trusted by the installer, and no
+proxy is started automatically. Installing the package does not replace an app
+copy on your Desktop or restart a running proxy; launch the copy in Applications
+and restart the managed proxy after finishing any active capture.
+
+The accompanying ZIP contains the same complete app for a manual drag into
+Applications. Keep the entire app bundle together. Packaged users can skip the
+source-building steps below. Developers can reproduce the installer using the
+[packaging guide](packaging/README.md).
+
+## Browser extension
+
+The independent Chrome extension lives in
+[`extensions/chatgpt-model-tracker/`](extensions/chatgpt-model-tracker/README.md).
+It records model fields exposed by ChatGPT web requests and responses and stores
+records in the browser's local extension storage, with CSV / JSON export.
+Its records are separate from the macOS app's capture archives.
+
+Load that folder as an unpacked extension from `chrome://extensions` with
+Developer mode enabled, then refresh ChatGPT. The folder contains the editable
+source; ZIP archives remain local and are ignored by Git. Run its tests with
+`node --test extensions/chatgpt-model-tracker/tests/test.mjs`.
+
+## Build from source (alternative)
+
 ### 1. Install the prerequisites
 
-The app targets **Apple Silicon and macOS 13 or later**. Building requires
+The app targets **Apple Silicon and macOS 14 or later**. Building requires
 Apple's command-line developer tools and Python 3.9 or later at
 `/usr/bin/python3`. The monitored desktop app must already be installed.
 
@@ -96,7 +151,9 @@ or include it in exported support files. Restrictive file permissions such as
 `600` help prevent access by other ordinary accounts, but do not protect it from
 malware running with your own account's permissions or administrator access.
 
-**System-keychain SSL trust is broader than the app being monitored.** Other
+**SSL trust is broader than the app being monitored.** The app's setup uses the
+current user's trust domain; the manual System-keychain method below affects a
+broader set of users and clients. Other
 clients using the same trust settings may also accept certificates issued by
 this CA. If someone obtains its private key and can intercept or redirect your
 connections, they may be able to impersonate HTTPS sites for those clients.
@@ -197,14 +254,14 @@ paths manually, use their full absolute paths instead of `~`.
 2. If the selected desktop app is already running, finish active work and choose
    **Restart with proxy**. **Show existing window** does not change that process's
    existing proxy settings.
-3. Check that the sidebar says **Proxy is running** and **GPT is running**.
+3. Check that the sidebar says **Proxy is recording** and **GPT is running**.
 4. Send a new message in the desktop app. The activity list refreshes about every
    four seconds; check the selected date and choose **All models** if needed.
 5. Switch between **Request model** and **Response model**, then click a timestamp
    to inspect its **Request**, **Response** and **Connection** packets.
 
 Use **Open capture viewer** for the live proxy view, **Open saved traffic** for
-full offline exports, or **Export CSV** for model counts and timestamps. Closing
+offline exports of retained packets, or **Export CSV** for model counts and timestamps. Closing
 Model Monitor keeps recording; **Stop proxy** stops its managed proxy.
 
 ## Troubleshooting
@@ -212,16 +269,27 @@ Model Monitor keeps recording; **Stop proxy** stops its managed proxy.
 | Symptom | Check |
 | --- | --- |
 | `mitmweb` or `brew` is not found | Finish the Homebrew PATH setup and reopen Terminal. Use `command -v mitmweb` and select that executable in Settings. |
-| The CA file is missing | Complete the certificate-generation step before starting Model Monitor's proxy. |
+| A complete installation reports a missing runtime | Reinstall the full package or ZIP, preserving the entire app bundle. Homebrew is only required for the separate source-only build. |
+| The CA file is missing | Use **Finish setup → Prepare Local Certificate**, or complete the manual certificate-generation step. |
 | `mitmproxy-ca.pem is missing` | The selected certificate folder must contain the matching CA/private-key file, not only the public certificate. Use the original folder. |
 | **Proxy certificate needs attention** or `tls alert certificate unknown` | Run the trust check above for the exact certificate selected in Settings. Confirm its SSL trust in Keychain Access, then completely quit and relaunch the target app through Model Monitor. Do not solve this by turning off TLS verification. |
 | Trust check succeeds but the target still rejects TLS | The client may use a separate trust store or certificate pinning. Model Monitor cannot guarantee interception of every app; macOS trust alone does not prove that every client accepts this CA. |
 | No new model records appear | Check the sidebar, date and model filter. Relaunch the target with **Restart with proxy**, then send a new message. Open the live viewer to check whether requests reach the proxy. Older requests sent directly are not captured retroactively. |
+| **Recording is not active** | The proxy is reachable but recording failed or its addon was removed. Preserve retained flows in the viewer before restarting. New workers keep a private script copy and stop on recording failure. |
 | The sidebar shows a different port | A preferred port was occupied. Use the active port shown in the sidebar when configuring another client. |
 | **Save** in Settings is disabled | Stop the managed proxy first, then change and save the settings. |
 | A large packet says **Preview shortened** | Only the displayed preview is bounded. Use the folder button to reveal the complete saved payload. |
 
 For diagnostic logs, click **Open data folder** and inspect `proxy.log`.
+If a running proxy lost its recording addon but still retains flows, the source
+checkout includes `python3 tools/restore_recording.py` (Python 3.9+). Finish any
+active generation before running it: the repair saves a native flow snapshot,
+briefly restarts the managed proxy on the same ports, and restores missing model
+records and packet contents. It keeps a snapshot and database backup under
+`Recovery/` in the active data folder. Existing archives are not overwritten;
+body prefixes must match before missing bytes are appended. Original chunk timing
+cannot be reconstructed from an in-memory flow snapshot. A locally prepared
+`dist/Restore recording.command` runs this same repair from Finder.
 Some failures are specific to a destination or client; a TLS failure is not
 always a missing certificate. The app reports recent repeated unresolved TLS
 incidents instead of displaying stale warnings permanently.
@@ -233,8 +301,26 @@ the desktop app it launches, not the system proxy. Other clients explicitly
 configured to use its active proxy address can also be captured.
 
 HTTP requests/responses, WebSocket messages and other application events exposed
-by mitmproxy are saved locally. Payloads include prompts, responses, headers,
-cookies and credentials without redaction. Failed TLS handshakes have no
+by mitmproxy are saved locally, with these storage rules:
+
+| Response model | Saved data |
+| --- | --- |
+| Astra family, including `gpt-6-astra` | Packet summaries: model, IDs, timestamps, status, available token usage, event counts, original byte counts and checksums. Prompt, generated text and tool contents are omitted. |
+| `codex-auto-review` | The same summary-only storage. |
+| All other models, including Luna | Full request and response bytes. |
+| Unclassified or ambiguously linked traffic | Full content to avoid losing another model's data. |
+
+The response model decides the rule. A request asking for Astra but returning
+Luna is retained in full. Requests are temporarily saved while waiting for this
+classification; ambiguous requests remain full. Shared WebSocket connections are
+filtered per response, so an Astra call cannot remove a Luna call on the same
+connection. The summary is metadata, not an AI-generated summary of the message.
+Model counts and timestamps remain available for every model. Forwarded traffic
+is unchanged; the live proxy viewer can still hold full flows in memory.
+
+Archives use transparent gzip compression (`Captures/YYYY-MM-DD/*.trace.gz`).
+Viewing and exporting restore the exact saved bytes; older `.trace` files remain
+readable. Full entries and shared connection metadata can include credentials. Failed TLS handshakes have no
 decrypted body to save. This is an application traffic archive, not an IP/TLS
 packet capture; WebSocket wire fragmentation and PING/PONG frames are outside
 the message interface.
@@ -244,6 +330,28 @@ profiles retain their previous folder. Archives rotate by date and size with
 **no automatic deletion**. After stopping the proxy, you can select an empty
 data folder in Settings; existing data is copied and the old folder is retained.
 Application data stays outside the app bundle, so rebuilding does not erase it.
+After updating, finish active generation and restart the managed proxy to apply
+the new policy. Its status note identifies the policy actually loaded.
+
+Existing archives, `Recovery/` snapshots and earlier exports are not silently
+rewritten. To prepare and validate a smaller copy of closed historical archives:
+
+```sh
+python3 tools/compact_captures.py --source "/path/to/data-folder" --output "/path/to/new-output-folder"
+```
+
+This checks archive integrity and verifies that identified other-model messages
+and non-summary HTTP/transport bodies remain byte-identical. It skips the active
+capture session and writes a size report. The original files remain untouched.
+To apply validated cleanup, stop the proxy and run
+`python3 tools/cleanup_storage.py`, or double-click
+`dist/Clean stored traffic.command` in a local checkout. It replaces historical
+archives with filtered compressed copies and deletes only verified duplicate
+recovery snapshots and regenerable packet previews. Other-model contents and
+all model counts, settings and certificates stay intact. This intentionally
+removes the original excluded-model bodies; it is not just a preview.
+See [storage and cleanup](STORAGE.md#validated-cleanup-command) for the checks
+and transaction receipt.
 
 Request and response models are counted separately. Response IDs are
 deduplicated across streaming events, and dates use **Asia/Hong_Kong**.
@@ -254,9 +362,10 @@ captured field, not independent verification of the underlying model weights.
 
 - [Operating guide](src/README.md): everyday controls, packet viewing and exports.
 - [Storage design](STORAGE.md): archive format, retention, recovery and capture limits.
+- [Installer build guide](packaging/README.md): bundled runtimes, local package build and verification.
 - `src/ModelScope.swift`: native SwiftUI/AppKit interface.
 - `src/controller.py`: proxy lifecycle, launch settings and data management.
-- `src/full_capture.py` and `src/traffic_archive.py`: capture and persistence.
+- `src/full_capture.py`, `src/retention.py` and `src/traffic_archive.py`: capture, retention rules and compressed persistence.
 - `src/packet_details.py`: per-record correlation and JSON previews.
 - `tests/`: synthetic unit tests and a separate local integration check.
 

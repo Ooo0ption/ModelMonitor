@@ -221,11 +221,22 @@ def run():
                 send_frame(stream,opcode,payload,True)
                 assert frame(stream)==(opcode,payload)
             ws = [(e,p) for e,p in records() if e['kind']=='websocket.message']
-            assert [p for e,p in ws]==[TEXT,TEXT,BINARY,BINARY]
-            assert [e['direction'] for e,p in ws]==['client_to_server','server_to_client']*2
-            print('Live WebSocket text and binary payloads in both directions: PASS', flush=True)
+            # A model request whose echo is not a model response stays in the
+            # durable pending queue until the connection ends. Other frames
+            # are archived immediately, and forwarding is unchanged.
+            pending=[p for path in (data/'Pending').glob('*.trace') for e,p in iter_records(path)]
+            assert TEXT in pending
+            assert [p for e,p in ws]==[TEXT,BINARY,BINARY]
             send_frame(stream,8,struct.pack('!H',1000),True)
             frame(stream); stream.close(); sock.close()
+            for _ in range(100):
+                ws=sorted([(e,p) for e,p in records() if e['kind']=='websocket.message'], key=lambda row:row[0]['message_index'])
+                if len(ws)==4: break
+                time.sleep(.01)
+            assert [p for e,p in ws]==[TEXT,TEXT,BINARY,BINARY]
+            assert [e['direction'] for e,p in ws]==['client_to_server','server_to_client']*2
+            assert not list((data/'Pending').glob('*.trace'))
+            print('Live WebSocket text/binary forwarding, durable pending requests and complete archive at close: PASS', flush=True)
 
             sock=socket.create_connection(('127.0.0.1',proxy_port),timeout=10)
             stream=sock.makefile('rwb',buffering=0)

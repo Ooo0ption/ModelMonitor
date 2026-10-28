@@ -193,6 +193,7 @@ def packet_detail(root, store, mode, record_id):
     files = archive_files(root)
     links = MessageLinks()
     states, ws_flows = {}, set()
+    summary_refs, summary_http = set(), set()
     warnings = []
     raw_found = False
     # Only envelopes and correlation references survive this pass, not all bodies
@@ -204,6 +205,9 @@ def packet_detail(root, store, mode, record_id):
                 continue
             if event.get('state'):
                 states[fid] = event['state']
+            if event.get('retention') == 'summary':
+                if event['kind'] == 'websocket.message': summary_refs.add((event['session'], event['sequence']))
+                elif event['kind'].startswith('http.'): summary_http.add(fid)
             if fid in fids:
                 raw_found = True
             if event['kind'] == 'websocket.message':
@@ -220,6 +224,7 @@ def packet_detail(root, store, mode, record_id):
         fids.add(links.responses[record_id]['flow_id'])
         raw_found = True
     is_ws = bool(ws_flows & fids)
+    is_summary = bool(set(chosen) & summary_refs) if is_ws else bool(fids & summary_http)
     output = root / 'Exports' / dt.datetime.fromtimestamp(info['timestamp'], ZONE).date().isoformat() / ('packet-' + hashlib.sha256((mode + ':' + record_id).encode()).hexdigest()[:24])
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
     messages = []
@@ -295,6 +300,10 @@ def packet_detail(root, store, mode, record_id):
                     with bodies[body_key].open('ab') as stream:
                         stream.write(payload)
                     body_sizes[body_key] += len(payload)
+                elif not is_ws and kind in ('http.request.summary', 'http.response.summary'):
+                    side = kind.split('.')[1]
+                    add_bytes(side.title() + ' summary', side, event['time'], payload,
+                              hashlib.sha256(repr((event['session'],event['sequence'])).encode()).hexdigest()[:24]+'.json')
         for fid in sorted(fids):
             state = states.get(fid, {})
             for side in ('request', 'response'):
@@ -340,9 +349,11 @@ def packet_detail(root, store, mode, record_id):
             add_bytes('Saved record', 'request' if mode == 'requests' else 'response', info['timestamp'], dumps(info).encode(), 'record.json')
     if warnings:
         notice += ' ' + ' '.join(sorted(set(warnings)))
+    if is_summary:
+        notice = 'Summary-only storage: prompt text, generated text and tool payloads were intentionally omitted for this model. Model, timing, status, usage and byte counts are retained. ' + notice
     for path in output.iterdir():
         if path.is_file(): os.chmod(path, 0o600)
     info['time'] = dt.datetime.fromtimestamp(info.pop('timestamp'), ZONE).isoformat(timespec='milliseconds')
-    return {'record': info, 'protocol_label': ('WebSocket' if is_ws else 'HTTP') if raw_found else 'Saved metadata',
+    return {'record': info, 'protocol_label': (('WebSocket' if is_ws else 'HTTP') + (' · summary' if is_summary else '')) if raw_found else 'Saved metadata',
             'url': next((states[fid].get('url', '') for fid in sorted(fids) if fid in states), ''),
             'notice': notice.strip(), 'messages': messages, 'flow_ids': sorted(fids)}
